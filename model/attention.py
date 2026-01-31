@@ -2,103 +2,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class AgentSelfAlignmentLayer(nn.Module):
-    """
-    Enables agent to understand what is the importance of each timestep.
-    Agent features are cross-attended with a learned query in temporal dimension.
-    """
-    
-    def __init__(self,
-                 params,
-                 seq_downsample=1):
-        super().__init__()
-        
-        self.seq_downsample=seq_downsample        
-        if params.hidden_size % params.num_heads != 0:
-            raise ValueError(f'params.hidden_size ({params.hidden_size}) must be an integer '
-                           f'times bigger than num_heads ({params.num_heads}).')
-        
-        self.attn_layer = nn.MultiheadAttention(
-            embed_dim=params.hidden_size,
-            num_heads=params.num_heads,
-            batch_first=True,
-            dropout=params.drop_prob
-        )
-        
-        self.attn_ln = nn.LayerNorm(params.hidden_size)
-        
-        self.ff_layer1 = nn.Linear(params.hidden_size, params.ff_dim)
-        self.ff_layer2 = nn.Linear(params.ff_dim, params.hidden_size)
-
-        self.ff_dropout = nn.Dropout(params.drop_prob)
-        self.ff_ln = nn.LayerNorm(params.hidden_size)
-        
-        # Learned query vector [1, 1, 1, h]
-        self.learned_query_vec = nn.Parameter(
-            torch.empty(1, 1, 1, params.hidden_size).uniform_(-1.0, 1.0)
-        )
-    
-    
-    def forward(self, input_batch):
-        
-        b, a, t, h = input_batch.shape
-        
-        out_seq = t//self.seq_downsample
-
-        # Build learned query [b, a, t, h]
-        learned_query = self.learned_query_vec.repeat(b, a, out_seq, 1)
-        
-        # Reshape tensors
-        learned_query_reshaped = learned_query.view(b*a, out_seq, h)
-        input_batch_reshaped = input_batch.view(b*a, t, h)
-        
-        attn_out, _ = self.attn_layer(
-            query=learned_query_reshaped,
-            key=input_batch_reshaped,
-            value=input_batch_reshaped,
-            attn_mask=None,
-        )
-        
-        attn_out = attn_out.view(b, a, out_seq, h)
-        attn_out = self.attn_ln(attn_out + input_batch)
-        
-        out = self.ff_layer1(attn_out)
-        out = F.relu(out)
-        out = self.ff_layer2(out)
-        out=self.ff_dropout(out)
-        out = self.ff_ln(out + attn_out)
-
-        return out
-
 class SelfAttnTransformerLayer(nn.Module):
     """Performs full self-attention across the agent and time dimensions."""
     
     def __init__(
         self,
-        params
+        params,
+        hidden_size,
+        mask_type=None
     ):
         super().__init__()
         
-        if params.hidden_size % params.num_heads != 0:
+        if hidden_size % params.num_heads != 0:
             raise ValueError(
-                f'hidden_size ({params.hidden_size}) must be an integer '
+                f'hidden_size ({hidden_size}) must be an integer '
                 f'times bigger than num_heads ({params.num_heads}).'
             )
         
+        self.mask_type=mask_type
+
         self.attn_layer = nn.MultiheadAttention(
-            embed_dim=params.hidden_size,
+            embed_dim=hidden_size,
             num_heads=params.num_heads,
             dropout=params.drop_prob,
             batch_first=True
         )
         
-        self.attn_ln = nn.LayerNorm(params.hidden_size)
-        
-        self.ff_layer1 = nn.Linear(params.hidden_size, params.ff_dim)
-        self.ff_layer2 = nn.Linear(params.ff_dim, params.hidden_size)
-        
-        self.ff_dropout = nn.Dropout(params.drop_prob)
-        self.ff_ln = nn.LayerNorm(params.hidden_size)
+        self.ff_layer=PostAttentionFFLayer(params=params, hidden_size=hidden_size)
     
     def forward(self, input_batch):
         
@@ -107,65 +37,149 @@ class SelfAttnTransformerLayer(nn.Module):
         
         input_batch_reshaped = input_batch.reshape(b, a * t, h)
         
+        if self.mask_type == 'causal':
+            seq_len = a * t
+            mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
+            mask = mask.to(input_batch.device)
+        else:
+            mask = None
+
         attn_out, _ = self.attn_layer(
             input_batch_reshaped,
             input_batch_reshaped,
             input_batch_reshaped,
-            attn_mask=None,
+            attn_mask=mask,
         )
 
         attn_out = attn_out.reshape(b, a, t, h)
-        attn_out = self.attn_ln(attn_out + input_batch)
         
-        out = self.ff_layer1(attn_out)
-        out = F.relu(out)
-        out = self.ff_layer2(out)
-        out = self.ff_dropout(out)
-        out = self.ff_ln(out + attn_out)
+        out = self.ff_layer(input_batch, attn_out)
         
         return out
 
-class AgentTypeCrossAttentionLayer(nn.Module):
-    def __init__(self, params):
+class CrossAttnTransformerLayer(nn.Module):
+    """Performs full cross-attention across the temporal dimension only."""
+    
+    def __init__(
+        self,
+        params,
+        hidden_size,
+    ):
         super().__init__()
-
-        self.attn_layer=nn.MultiheadAttention(
-            embed_dim=params.hidden_size, 
+        
+        if hidden_size % params.num_heads != 0:
+            raise ValueError(
+                f'hidden_size ({hidden_size}) must be an integer '
+                f'times bigger than num_heads ({params.num_heads}).'
+            )
+        
+        self.attn_layer = nn.MultiheadAttention(
+            embed_dim=hidden_size,
             num_heads=params.num_heads,
             dropout=params.drop_prob,
-            batch_first=True)
+            batch_first=True
+        )
         
-        self.attn_ln = nn.LayerNorm(params.hidden_size)
-
-        self.ff_layer1=nn.Linear(in_features=params.hidden_size, out_features=params.ff_dim)
-        self.ff_layer2 = nn.Linear(params.ff_dim, params.hidden_size)
-
-        self.ff_dropout = nn.Dropout(params.drop_prob)
-        self.ff_ln = nn.LayerNorm(params.hidden_size)
-
-
-    def forward(self,human_embedding, robot_embedding):
+        self.ff_layer=PostAttentionFFLayer(params=params, hidden_size=hidden_size)
+    
+    def forward(self, query_seq, key_seq):
         
-        b,ha,ht,hh=human_embedding.shape
-        _,ra,rt,rh=robot_embedding.shape
+        # [b, a, t, h]
+        bq, aq, tq, hq = query_seq.shape
 
-        human_embedding=human_embedding.reshape(b,ht*ha,hh)
-        robot_embedding=robot_embedding.reshape(b,rt*ra,rh)
+        bk, ak, tk, hk = key_seq.shape
+
+        query_seq_reshaped = query_seq.reshape(bq*aq, tq, hq)
+        key_seq_reshaped = key_seq.reshape(bk*ak, tk, hk)
+
+        attn_out, _ = self.attn_layer(
+            query_seq_reshaped,
+            key_seq_reshaped,
+            key_seq_reshaped,
+        )
+
+        attn_out = attn_out.reshape(bq, aq, tq, hq)
         
-        attn_out,_= self.attn_layer(
-            query=human_embedding,
-            key=robot_embedding,
-            value=robot_embedding,
-            attn_mask=None)
+        out = self.ff_layer(query_seq, attn_out)
         
-        attn_out=attn_out.reshape(b,ha,ht,hh)
-        human_embedding=human_embedding.reshape(b,ha,ht,hh)
-        attn_out=self.attn_ln(human_embedding+attn_out)
-
-        out=self.ff_layer1(attn_out)
-        out=F.relu(out)
-        out=self.ff_layer2(out)
-        out = self.ff_dropout(out)
-        out=self.ff_ln(out+attn_out)
-
         return out
+
+class AgentTypeCrossAttnTransformerLayer(nn.Module):
+    """Performs full cross-attention across the agent and time dimensions."""
+    
+    def __init__(
+        self,
+        params,
+        hidden_size,
+    ):
+        super().__init__()
+        
+        if hidden_size % params.num_heads != 0:
+            raise ValueError(
+                f'hidden_size ({hidden_size}) must be an integer '
+                f'times bigger than num_heads ({params.num_heads}).'
+            )
+        
+        self.attn_layer = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=params.num_heads,
+            dropout=params.drop_prob,
+            batch_first=True
+        )
+        
+        self.ff_layer=PostAttentionFFLayer(params=params, hidden_size=hidden_size)
+    
+    def forward(self, query_seq, key_seq):
+        
+        # [b, a, t, h]
+        bq, aq, tq, hq = query_seq.shape
+
+        bk, ak, tk, hk = key_seq.shape
+
+        query_seq_reshaped = query_seq.reshape(bq, tq*aq, hq)
+        key_seq_reshaped = key_seq.reshape(bk, tk*ak, hk)
+
+        attn_out, _ = self.attn_layer(
+            query_seq_reshaped,
+            key_seq_reshaped,
+            key_seq_reshaped,
+        )
+
+        attn_out = attn_out.reshape(bq, aq, tq, hq)
+        
+        out = self.ff_layer(query_seq, attn_out)
+        
+        return out
+
+class PostAttentionFFLayer(nn.Module):
+    
+    def __init__(self, 
+                 params,
+                 hidden_size,
+                 expansion_factor=None):
+        super().__init__()
+
+        if expansion_factor is None:
+            self.expansion_factor=params.ff_expansion_factor
+        else:
+            self.expansion_factor=expansion_factor
+
+        self.attn_lnorm = nn.LayerNorm(hidden_size)
+        self.ff_lnorm = nn.LayerNorm(hidden_size)
+        
+        ff_dim = int(hidden_size * self.expansion_factor)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, ff_dim),
+            nn.GELU(),
+            nn.Dropout(params.drop_prob),
+            nn.Linear(ff_dim, hidden_size),
+        )
+        self.dropout = nn.Dropout(params.drop_prob)
+    
+    def forward(self, input, attn_out):
+      
+        x = self.attn_lnorm(input + attn_out)
+        
+        x = self.ff_lnorm(x + self.dropout(self.ffn(x)))
+        
+        return x
