@@ -1,7 +1,10 @@
-## Status
+# TODO
+- Update synthetic dataset generation scripts
+- Torch dataset definition
 
-This repository is currently under development.
+The model definition is given in `model/`.
 
-A torch dataset implementation is provided in `dataset/torch_dataset/` and the model definition is given in `model/`.
+# Model Architecture
 
-Test commit
+![alt text](images/transformer-cvae.png)
+
