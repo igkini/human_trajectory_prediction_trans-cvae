@@ -1,278 +1,208 @@
-import json
-import math
 import csv
 import random
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-from scripts.dataset.synthetic.utils import (
-    Grid,
-    spawn_goals,
-    theta_star,
-    smooth_path_with_beziers,
-    create_padded,
-    get_bounds,
-    NoFreeCellsError
+import os
+
+from .utils.config import (
+    ORIGIN_MODE,
+    NUM_RANDOM_MAPS, VISIBLE_STATIONS_PER_MAP, HIDDEN_STATIONS_PER_MAP, CSV_PATH, GRID_OUTPUT_DIR,
+    MASK_PROBABILITY,
+    OBSTACLE_DENSITY,
+    REGULAR_OBSTACLE_SIZE_RANGE,
+    NUM_SMALL_OBSTACLES, SMALL_OBSTACLE_SIZE_RANGE,
+    NUM_NARROW_OBSTACLES, NARROW_OBSTACLE_WIDTH_RANGE, NARROW_OBSTACLE_HEIGHT_RANGE,
+    DRAW, FRAME_INTERVAL, MIN_POINTS,
+    GRID_SIZE, GRID_RESOLUTION,
+    ORIG_GRID_WIDTH_RANGE, ORIG_GRID_HEIGHT_RANGE,
+    X_MIN_RANGE, Y_MIN_RANGE,
+    FIXED_MAP_ORIGIN_X, FIXED_MAP_ORIGIN_Y,
+    STATION_OFFSET_DISTANCE
 )
-from shapely.geometry import Polygon, Point
 
-# ───────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ───────────────────────────────────────────────────────────────────────────────
-NUM_PARTS   = 5
-CSV_PATH    = "paths.csv"
-SAVE_EVERY  = 100  
-DRAW        = True 
-
-# ───────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ───────────────────────────────────────────────────────────────────────────────
-x_min, y_min, x_max, y_max = -5.25, -3.5, 5.35, 9.0
-
-MOBILE_WIDTH, MOBILE_HEIGHT = 1.75, 0.9
-AGV_WIDTH, AGV_HEIGHT       = 1.75, 3.0
-TOOL_BASE_WIDTH, TOOL_BASE_HEIGHT = 1.0, 0.5
-BATTERY_WIDTH, BATTERY_HEIGHT     = 1.2, 0.5
-DYDYNAMIC_CENTER= (0, 4)
-DYNAMIC_WIDTH, DYNAMIC_HEIGHT = 1.0, 1.
-
-TOOL_VAR_X, TOOL_VAR_Y = 1.5, 0.5
-BATTERY_VAR_X = 0.5
-
-TOOL_ROT_RANGE = 90
-AGV_ROT_RANGE  = 10
-MOBILE_ROT_RANGE = 10
-
-tasks = json.load(open(Path("scripts/dataset/synthetic/task_library.json")))
-
-# ───────────────────────────────────────────────────────────────────────────────
-# ENVIRONMENT + PARTITION
-# ───────────────────────────────────────────────────────────────────────────────
-def build_environment(ax, agv_key, mobile_key, draw=True):
-    pads = []
-    objects_no_pad = []
-
-    def cp(ax, *args, **kwargs):
-        return create_padded(ax, *args, draw=draw, **kwargs)
-
-    # Dynamic object
-    dynamic = cp(ax, DYDYNAMIC_CENTER, DYNAMIC_WIDTH, DYNAMIC_HEIGHT,
-                 color="lightgrey", edgecolor="black",
-                 jitter_x=(-0.5, 0.5), jitter_y=(-0.5, 0.5),
-                 rotation_deg=random.uniform(-10, 10))
-    pads.append(dynamic["collision_data"])
-    objects_no_pad.append(dynamic["original_collision_data"])
-
-    # Desk
-    desk = cp(ax, (4.1 - 1.25, -3.5), 2.5, 7.0, color="wheat", edgecolor="brown")
-    pads.append(desk["collision_data"])
-    objects_no_pad.append(desk["original_collision_data"])
-
-    # Battery
-    battery = cp(ax, (-0.350, -0.850), BATTERY_WIDTH, BATTERY_HEIGHT,
-                 color="lightblue", jitter_x=(0, BATTERY_VAR_X), edgecolor="blue")
-    pads.append(battery["collision_data"])
-    objects_no_pad.append(battery["original_collision_data"])
-
-    # Tool
-    tool = cp(ax, (-0.250, 1.400), TOOL_BASE_WIDTH, TOOL_BASE_HEIGHT,
-              color="lightgreen", edgecolor="green",
-              jitter_x=(0, TOOL_VAR_X),
-              jitter_y=(-TOOL_VAR_Y, TOOL_VAR_Y * 0.1),
-              rotation_deg=random.uniform(-TOOL_ROT_RANGE, TOOL_ROT_RANGE))
-    pads.append(tool["collision_data"])
-    objects_no_pad.append(tool["original_collision_data"])
-
-    # AGV
-    agv_center = {"random": (-4.5, 0), "marriage_point_agv": (-4.5, -0.5)}[agv_key]
-    agv_jitter_y = (-3, 5) if agv_key == "random" else (0., 1.)
-    agv = cp(ax, agv_center, AGV_WIDTH, AGV_HEIGHT,
-             color="lightcoral", edgecolor="red",
-             jitter_y=agv_jitter_y, jitter_x=(0., 0.8),
-             rotation_deg=random.uniform(-AGV_ROT_RANGE, AGV_ROT_RANGE))
-    pads.append(agv["collision_data"])
-    objects_no_pad.append(agv["original_collision_data"])
-
-    # Mobile
-    if mobile_key == "assembly":
-        mob_pos = (battery["center"][0] - 0.6, battery["center"][1] - 1.395)
-        mob = cp(ax, mob_pos, MOBILE_WIDTH, MOBILE_HEIGHT,
-                 color="plum", edgecolor="purple",
-                 jitter_x=(-0.5, 0.3), jitter_y=(-0.2, 0.2),
-                 rotation_deg=random.uniform(-MOBILE_ROT_RANGE, MOBILE_ROT_RANGE))
-    else:
-        mob_pos = (agv["center"][0] + 0.33 * AGV_WIDTH, agv["center"][1])
-        mob = cp(ax, mob_pos, MOBILE_WIDTH, MOBILE_HEIGHT,
-                 color="plum", edgecolor="purple",
-                 rotation_deg=90 + random.uniform(-MOBILE_ROT_RANGE, MOBILE_ROT_RANGE),
-                 jitter_y=(-0.5, 0.5), jitter_x=(-0.1, 0.1))
-    pads.append(mob["collision_data"])
-    objects_no_pad.append(mob["original_collision_data"])
-
-    centers = tool["center"], agv["center"], mob["center"], battery["center"]
-    return pads, centers, objects_no_pad
+from .utils.goals import spawn_goals_near_obstacles, spawn_goals, filter_far_points
+from .utils.plotting import setup_plot, finalize_plot
+from .utils.environment import build_random_environment
+from .utils.grid import Grid, NoFreeCellsError
+from .utils.trajectories import generate_paths_and_log
+from .utils.occupancy_grid import generate_occupancy_grid
 
 
-def partition_goals(entries, n_parts):
-    partitions = [[] for _ in range(n_parts)]
-    for entry in entries:
-        n = entry["n_goals"]
-        slice_size = int(round(n * (1 / n_parts)))
-        p = [slice_size for _ in range(n_parts - 1)]
-        p.append(n - sum(p))
-        for i in range(n_parts):
-            partitions[i].append((entry["goal"], p[i]))
-    return partitions
+def calculate_num_regular_obstacles(workspace_area, density=OBSTACLE_DENSITY):
+    import numpy as np
+    return int(np.sqrt(workspace_area) * density)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# PATH GENERATION + CSV LOGGING
-# ───────────────────────────────────────────────────────────────────────────────
-def generate_paths_and_log(ax, starts, goals, grid, pads, writer,
-                           task_id, mobile_center, agv_center, grid_id,
-                           path_id_start=0, save_every=SAVE_EVERY,
-                           draw=True):
-    pid = path_id_start
-    for sx, sy in starts:
-        for gx, gy in goals:
-            raw = theta_star((sx, sy), (gx, gy), grid, pads)
-            if not raw:
-                continue
-            path = smooth_path_with_beziers(raw)
-            if draw and ax is not None:
-              px, py = zip(*path)
-              ax.plot(px, py, lw=1.2)
+def calculate_workspace_bounds(map_origin_x, map_origin_y, workspace_width_px, workspace_height_px,
+                               grid_size=GRID_SIZE, grid_resolution=GRID_RESOLUTION):
+    pad_x_pixels = grid_size - workspace_width_px
+    pad_y_pixels = grid_size - workspace_height_px
+    pad_left = pad_x_pixels // 2
+    pad_bottom = pad_y_pixels // 2
 
-            last_idx = len(path) - 1
-            for i, (x, y) in enumerate(path):
-                if (i % save_every == 0) or (i == last_idx):
-                    writer.writerow([pid, task_id, x, y,
-                                     mobile_center[0], mobile_center[1],
-                                     agv_center[0], agv_center[1], grid_id])
-            pid += 1
-    return pid
+    x_min = map_origin_x + pad_left * grid_resolution
+    y_min = map_origin_y + pad_bottom * grid_resolution
 
-def generate_occupancy_grid(grid, objects_no_pad, grid_id):
-    occupancy = np.zeros((grid.rows, grid.cols), dtype=int)
-    
-    for obj in objects_no_pad:
-        poly = Polygon(obj['corners'])
-        
-        indices = [grid.to_idx((x, y)) for x, y in obj['corners']]
-        i_min = max(0, min(i for i, j in indices))
-        i_max = min(grid.cols - 1, max(i for i, j in indices))
-        j_min = max(0, min(j for i, j in indices))
-        j_max = min(grid.rows - 1, max(j for i, j in indices))
-        
-        for i in range(i_min, i_max + 1):
-            for j in range(j_min, j_max + 1):
-                x = grid.x_min + i * grid.resolution + grid.resolution / 2
-                y = grid.y_min + j * grid.resolution + grid.resolution / 2
-                if poly.contains(Point(x, y)):
-                    occupancy[j, i] = 1
-    
-    with open(f"grid_{grid_id}.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        for j in range(grid.rows - 1, -1, -1):
-            writer.writerow(list(occupancy[j]))
-    
-    return grid_id
+    workspace_width_m = workspace_width_px * grid_resolution
+    workspace_height_m = workspace_height_px * grid_resolution
 
-# ───────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ───────────────────────────────────────────────────────────────────────────────
+    x_max = x_min + workspace_width_m
+    y_max = y_min + workspace_height_m
+
+    return {
+        'x_min': x_min, 'x_max': x_max, 'y_min': y_min, 'y_max': y_max,
+        'width': workspace_width_m, 'height': workspace_height_m,
+        'area': workspace_width_m * workspace_height_m,
+        'orig_width': workspace_width_px, 'orig_height': workspace_height_px,
+        'pad_x_pixels': pad_x_pixels, 'pad_y_pixels': pad_y_pixels
+    }
+
 def main():
-    path_id_counter = 0
+    traj_id_counter = 0
     grid_id_counter = 0
 
+    visible_n = VISIBLE_STATIONS_PER_MAP
+    hidden_n = HIDDEN_STATIONS_PER_MAP
+
+    print("=== FULLY RANDOM MODE ===")
+    print(f"Generating {NUM_RANDOM_MAPS} random maps")
+    print(f"Visible stations/map: {visible_n} (written to CSV)")
+    print(f"Hidden stations/map:  {hidden_n} (NOT written to CSV; used for start/goal)")
+
+    csv_header = [
+        "task_id", "grid_id", "traj_id", "frame_id",
+        "agent_id", "agent_type", "x", "y", "z", "pos_mask",
+        "stations_pos/mask", "robot_pos/mask",
+    ]
+    for i in range(visible_n):
+        csv_header.append(f"station_{i}_x")
+        csv_header.append(f"station_{i}_y")
+
+    os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
     with open(CSV_PATH, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["path_id","task_id","x","y",
-                         "mobile_cx","mobile_cy","agv_cx","agv_cy","grid_id"])
+        writer.writerow(csv_header)
 
-        for task in tasks:
-            start_parts = partition_goals(task["start_pos"], NUM_PARTS)
-            goal_parts  = partition_goals(task["goal_pos"], NUM_PARTS)
+        for map_num in range(NUM_RANDOM_MAPS):
+            workspace_width_px = random.randint(*ORIG_GRID_WIDTH_RANGE)
+            workspace_height_px = random.randint(*ORIG_GRID_HEIGHT_RANGE)
 
-            for stage in range(NUM_PARTS):
-                ax = None
-                if DRAW:
-                    fig, ax = plt.subplots(figsize=(9,7))
-                    ax.set_xlim(x_min, x_max)
-                    ax.set_ylim(y_min, y_max)
-                    ax.set_aspect('equal')
-                    ax.grid(True, alpha=0.3)
-                    ax.set_title(f"Task {task['task_id']} - Part {stage+1}/{NUM_PARTS}: {task['title']}")
+            if ORIGIN_MODE == "fixed":
+                map_origin_x = FIXED_MAP_ORIGIN_X
+                map_origin_y = FIXED_MAP_ORIGIN_Y
+            elif ORIGIN_MODE == "random":
+                map_origin_x = random.uniform(*X_MIN_RANGE)
+                map_origin_y = random.uniform(*Y_MIN_RANGE)
+            else:
+                raise ValueError("Invalid ORIGIN_MODE")
 
-                while True:
-                    try:
-                        pads, (tool_c, agv_c, mob_c, batt_c), objects_no_pad = \
-                            build_environment(ax, task["agv_pos"], task["mobile_pos"], draw=DRAW)
-                        grid = Grid((x_min,x_max),(y_min,y_max),resolution=0.2)
-                        grid_id = f"{task['task_id']}_{stage+1}"
-                        generate_occupancy_grid(grid, objects_no_pad, grid_id)
-                        grid_id_counter += 1
+            workspace = calculate_workspace_bounds(
+                map_origin_x, map_origin_y,
+                workspace_width_px, workspace_height_px
+            )
+            x_min, x_max = workspace["x_min"], workspace["x_max"]
+            y_min, y_max = workspace["y_min"], workspace["y_max"]
+            workspace_area = workspace["area"]
 
-                        GOAL_AREA = {
-                            "random":           get_bounds((0.05,2.75),10.6,12.5,0),
-                            "tool_station":     get_bounds(tool_c,1.05,0.55,0.0),
-                            "battery_assembly": get_bounds((batt_c[0],batt_c[1]+0.45), batt_c[0]+0.6,0.0,0.05),
-                            "agv_ph1":          get_bounds((agv_c[0]+2,agv_c[1]+3.5),1.5,1.5,0.5),
-                            "agv_ph2":          get_bounds(agv_c, AGV_WIDTH+0.2, AGV_HEIGHT+0.2,0.0),
+            num_regular_obstacles = calculate_num_regular_obstacles(workspace_area)
+            total_obstacles = num_regular_obstacles + NUM_SMALL_OBSTACLES + NUM_NARROW_OBSTACLES
+
+            print(f"\n[Map {map_num + 1}] Area: {workspace_area:.2f}m², Obs: {total_obstacles}")
+
+            ax = setup_plot(f"Map {map_num}", x_min, x_max, y_min, y_max) if DRAW else None
+
+            for retry in range(10):
+                try:
+                    obstacle_config = {
+                        "regular": {"count": num_regular_obstacles, "size_range": REGULAR_OBSTACLE_SIZE_RANGE},
+                        "small": {"count": NUM_SMALL_OBSTACLES, "size_range": SMALL_OBSTACLE_SIZE_RANGE, "pad": 0.1},
+                        "narrow": {
+                            "count": NUM_NARROW_OBSTACLES,
+                            "width_range": NARROW_OBSTACLE_WIDTH_RANGE,
+                            "height_range": NARROW_OBSTACLE_HEIGHT_RANGE,
+                            "pad": 0.15
                         }
+                    }
 
-                        # spawn goals
-                        starts, goals = [], []
-                        for goal_type,n in start_parts[stage]:
-                            if n>0:
-                                area = GOAL_AREA[goal_type]
-                                pts = spawn_goals(n, grid, pads, area["x_bounds"], area["y_bounds"])
-                                starts.extend(pts)
-                        for goal_type,n in goal_parts[stage]:
-                            if n>0:
-                                area = GOAL_AREA[goal_type]
-                                pts = spawn_goals(n, grid, pads, area["x_bounds"], area["y_bounds"])
-                                goals.extend(pts)
+                    pads, (agv_c, mob_c), objects_no_pad = build_random_environment(
+                        ax, x_min, x_max, y_min, y_max, total_obstacles,
+                        obstacle_config=obstacle_config, draw=DRAW
+                    )
 
-                        # logging
-                        start_count = len(starts)
-                        goal_count = len(goals)
-                        print(f"[Task {task['task_id']} - Part {stage+1}] Generated {start_count} starts, {goal_count} goals.")
-                        break
+                    grid = Grid((x_min, x_max), (y_min, y_max), resolution=0.2)
 
-                    except NoFreeCellsError as e:
-                        print(f"{e} → rebuilding environment and retrying …")
-                        if DRAW and ax is not None:
-                            ax.cla()
-                            ax.set_xlim(x_min, x_max)
-                            ax.set_ylim(y_min, y_max)
-                            ax.set_aspect('equal')
-                            ax.grid(True, alpha=0.3)
-                            ax.set_title(f"Task {task['task_id']} - Part {stage+1}/{NUM_PARTS}: {task['title']}")
-                        continue
+                    visible_stations = spawn_goals_near_obstacles(
+                        visible_n, grid, pads,
+                        ((x_min, x_max), (y_min, y_max)),
+                        offset_dist=STATION_OFFSET_DISTANCE
+                    )
 
-                # plot markers
-                if DRAW and ax is not None:
-                    if starts: ax.plot(*zip(*starts), 'bo', ms=4, label='start')
-                    if goals:  ax.plot(*zip(*goals),  'rx', ms=5, label='goal')
+                    hidden_stations = []
+                    if hidden_n > 0:
+                        hidden_stations = spawn_goals(
+                            hidden_n, grid, pads,
+                            (x_min, x_max), (y_min, y_max),
+                            min_distance=grid.resolution * 5
+                        )
+                        hidden_stations = filter_far_points(hidden_stations, visible_stations, min_dist=1.0)
 
-                # paths + logging
-                path_id_counter = generate_paths_and_log(
-                    ax, starts, goals, grid, pads, writer,
-                    task_id=task['task_id'],
-                    mobile_center=mob_c,
-                    agv_center=agv_c,
-                    grid_id=grid_id,
-                    path_id_start=path_id_counter,
-                    save_every=SAVE_EVERY,
-                    draw=DRAW
-                )
+                        safety_iters = 0
+                        while len(hidden_stations) < hidden_n and safety_iters < 20:
+                            safety_iters += 1
+                            needed = hidden_n - len(hidden_stations)
+                            extra = spawn_goals(
+                                needed, grid, pads,
+                                (x_min, x_max), (y_min, y_max),
+                                min_distance=grid.resolution * 5
+                            )
+                            extra = filter_far_points(extra, visible_stations + hidden_stations, min_dist=1.0)
+                            hidden_stations.extend(extra)
 
-                if DRAW and ax is not None:
-                    ax.legend(loc='upper right')
-                    plt.tight_layout()
-                    plt.show()
+                        hidden_stations = hidden_stations[:hidden_n]
 
-    print(f"Done. Paths saved to {CSV_PATH}")
+                    all_stations_for_paths = list(visible_stations) + list(hidden_stations)
+
+                    station_coords_flat = []
+                    for (sx, sy) in visible_stations:
+                        station_coords_flat.extend([sx, sy])
+
+                    while len(station_coords_flat) < visible_n * 2:
+                        station_coords_flat.extend([0.0, 0.0])
+
+                    task_id = f"random_{map_num}"
+                    grid_id = f"random_{grid_id_counter}"
+
+                    generate_occupancy_grid(
+                        objects_no_pad, grid_id,
+                        grid_size=GRID_SIZE, resolution=GRID_RESOLUTION,
+                        x_min=x_min, y_min=y_min, x_max=x_max, y_max=y_max,
+                        map_origin_x=map_origin_x, map_origin_y=map_origin_y,
+                        output_dir=GRID_OUTPUT_DIR
+                    )
+                    grid_id_counter += 1
+
+                    if DRAW and ax:
+                        if visible_stations:
+                            ax.plot(*zip(*visible_stations), "r*", ms=8, label="visible stations")
+                        if hidden_stations:
+                            ax.plot(*zip(*hidden_stations), "kx", ms=6, label="hidden stations")
+
+                    traj_id_counter = generate_paths_and_log(
+                        ax, all_stations_for_paths, grid, pads, writer,
+                        task_id, grid_id, mob_c, agv_c,
+                        station_coords_flat,
+                        traj_id_counter, FRAME_INTERVAL, MIN_POINTS, DRAW,
+                        mask_prob=MASK_PROBABILITY, n_trajectories=10
+                    )
+
+                    break
+
+                except NoFreeCellsError:
+                    print(f"  Retry {retry + 1}...")
+                    if DRAW and ax:
+                        ax.cla()
+
+            if DRAW and ax:
+                finalize_plot(ax)
+
+    print(f"\n✓ Generated {NUM_RANDOM_MAPS} maps, {traj_id_counter} trajectories")
 
 if __name__ == '__main__':
     main()

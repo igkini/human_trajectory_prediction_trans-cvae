@@ -80,7 +80,6 @@ class FeatureAddAgentEncoderLayer(nn.Module):
         
         self.hidden_size = hidden_size
         agents_feature_config = getattr(params, f"{agent_type}_agents_feature_config")
-        print(agents_feature_config)
         
         self.num_encoders = len(agents_feature_config) + 1
         self.input_size = self.num_encoders * self.hidden_size

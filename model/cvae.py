@@ -68,12 +68,11 @@ class TransformerCVAE(nn.Module):
             future_batch=None
         )
         
-        _,_,t,h = self.latent.shape
-        b, a, _, _= past_cond.shape
+        b, a, t, _= past_cond.shape
         device = past_cond.device
         
         # Sample z from prior N(0, I)
-        z = torch.randn(b, a, t, h, device=device) * temperature
+        z = torch.randn(b, a, t, self.latent_size, device=device) * temperature
         
         # Decode to get trajectory prediction
         out = self.decoder(z, past_cond, scene_cond, station_cond)

@@ -1,0 +1,51 @@
+# Constants for object sizes
+MOBILE_WIDTH, MOBILE_HEIGHT = 1.75, 0.9
+AGV_WIDTH, AGV_HEIGHT = 1.75, 3.0
+
+# Origin Mode: "fixed" or "random"
+ORIGIN_MODE = "random"
+
+# Generation Settings
+NUM_RANDOM_MAPS = 300
+HIDDEN_STATIONS_PER_MAP = 3   
+VISIBLE_STATIONS_PER_MAP = 7  
+
+CSV_PATH = "data/256/paths_random.csv"
+GRID_OUTPUT_DIR = "data/256"
+
+# Masking Settings
+MASK_PROBABILITY = 0.2
+
+# Obstacle Density Settings
+OBSTACLE_DENSITY = 0.2
+REGULAR_OBSTACLE_SIZE_RANGE = (0.7, 2)
+NUM_SMALL_OBSTACLES = 5
+SMALL_OBSTACLE_SIZE_RANGE = (0.1, 0.3)
+NUM_NARROW_OBSTACLES = 2
+NARROW_OBSTACLE_WIDTH_RANGE = (0.1, 0.3)
+NARROW_OBSTACLE_HEIGHT_RANGE = (1.5, 3)
+
+# General Settings
+DRAW = False
+FRAME_INTERVAL = 0.4
+MIN_POINTS = 25
+
+# Fixed Grid Settings
+GRID_SIZE = 256
+GRID_RESOLUTION = 0.05
+
+# Randomization Ranges
+ORIG_GRID_WIDTH_RANGE = (160, 256)
+ORIG_GRID_HEIGHT_RANGE = (160, 256)
+X_MIN_RANGE = (-4, -8)
+Y_MIN_RANGE = (-4, -8)
+
+# Origin Configuration
+FIXED_MAP_ORIGIN_X = -14.4
+FIXED_MAP_ORIGIN_Y = -5.2
+
+ORIGIN_OFFSET_X_RANGE = (-2.0, 2.0)
+ORIGIN_OFFSET_Y_RANGE = (-2.0, 2.0)
+
+# Station Spawning Configuration
+STATION_OFFSET_DISTANCE = 0.2
