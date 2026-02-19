@@ -230,3 +230,4 @@ data/synthetic/
 data/oxford/
 workspace_demo2D.py
 model/*
+trajectory_plots/
